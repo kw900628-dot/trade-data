@@ -55,15 +55,13 @@ def get_stock_list(market_type=None, uploaded_file=None):
             }
             return pd.DataFrame(data)
 
-def calculate_mas(df):
-    """이동평균선을 계산합니다."""
-    df['MA5'] = df['Close'].rolling(window=5).mean()
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['MA60'] = df['Close'].rolling(window=60).mean()
-    df['MA120'] = df['Close'].rolling(window=120).mean()
+def calculate_mas(df, periods=[5, 20, 60, 120]):
+    """이동평균선을 계산합니다. periods 리스트에 있는 기간들을 계산합니다."""
+    for p in periods:
+        df[f'MA{p}'] = df['Close'].rolling(window=p).mean()
     return df
 
-def check_conditions(df, selected_conditions):
+def check_conditions(df, params):
     """선택된 조건들을 모두 만족하는 시점을 찾아 Boolean Series로 반환합니다."""
     # 데이터가 충분하지 않으면 False 반환
     if len(df) < 120:
@@ -72,49 +70,60 @@ def check_conditions(df, selected_conditions):
     # 기본 마스크 (모두 True로 시작 -> AND 연산)
     combined_mask = pd.Series([True] * len(df), index=df.index)
     
-    # 1. 이평선 정배열
-    if "정배열" in selected_conditions:
-        mask = (df['MA20'] > df['MA60']) & (df['MA60'] > df['MA120'])
+    # 1. 이평선(일)
+    if 'ma' in params:
+        p = params['ma']
+        # 예: MA20 > MA60 > MA120
+        mask = (df[f'MA{p["ma1"]}'] > df[f'MA{p["ma2"]}']) & (df[f'MA{p["ma2"]}'] > df[f'MA{p["ma3"]}'])
         combined_mask = combined_mask & mask
 
-    # 2. 골든크로스 (20 > 60)
-    if "MA 20>60" in selected_conditions:
-        mask = (df['MA20'].shift(1) < df['MA60'].shift(1)) & (df['MA20'] > df['MA60'])
+    # 2. 주가 돌파(일)
+    if 'breakout' in params:
+        p = params['breakout']
+        # 시가/종가 컬럼 매핑
+        col_map = {'시가': 'Open', '종가': 'Close'}
+        price_col = df[col_map[p['price_type']]]
+        ma_col = df[f'MA{p["target_ma"]}']
+        
+        if p['operator'] == '>':
+            mask = price_col > ma_col
+        else: # '<'
+            mask = price_col < ma_col
         combined_mask = combined_mask & mask
 
-    # 3. 골든크로스 (20 > 120)
-    if "MA 20>120" in selected_conditions:
-        mask = (df['MA20'].shift(1) < df['MA120'].shift(1)) & (df['MA20'] > df['MA120'])
-        combined_mask = combined_mask & mask
+    # 3. 주가 등락(일)
+    if 'change' in params:
+        p = params['change']
+        # 등락률 계산: (오늘 종가 - 어제 종가) / 어제 종가 * 100
+        daily_ret = df['Close'].pct_change() * 100
         
-    # 4. 주가 골든크로스 (종가 > 20)
-    if "종가 > 20선" in selected_conditions:
-        mask = (df['Close'].shift(1) < df['MA20'].shift(1)) & (df['Close'] > df['MA20'])
+        r_min, r_max = 0, float('inf')
+        if p['range'] == '3~5': r_min, r_max = 3, 5
+        elif p['range'] == '5~7': r_min, r_max = 5, 7
+        elif p['range'] == '7~9': r_min, r_max = 7, 9
+        elif p['range'] == '9이상': r_min = 9
+
+        if p['direction'] == '상승':
+            mask = (daily_ret >= r_min) & (daily_ret < r_max)
+        else: # 하락 (절대값 비교)
+            mask = (daily_ret <= -r_min) & (daily_ret > -r_max)
         combined_mask = combined_mask & mask
 
-    # 5. 주가 골든크로스 (종가 > 60)
-    if "종가 > 60선" in selected_conditions:
-        mask = (df['Close'].shift(1) < df['MA60'].shift(1)) & (df['Close'] > df['MA60'])
-        combined_mask = combined_mask & mask
+    # 4. 거래량(일)
+    if 'volume' in params:
+        p = params['volume']
+        # 거래량 변화율
+        vol_change = df['Volume'].pct_change() * 100
         
-    # 6. 주가 골든크로스 (종가 > 120)
-    if "종가 > 120선" in selected_conditions:
-        mask = (df['Close'].shift(1) < df['MA120'].shift(1)) & (df['Close'] > df['MA120'])
-        combined_mask = combined_mask & mask
+        v_min, v_max = 0, float('inf')
+        if p['range'] == '100~200': v_min, v_max = 100, 200
+        elif p['range'] == '200~300': v_min, v_max = 200, 300
+        elif p['range'] == '300이상': v_min = 300
         
-    # 7. 거래량 급증 (전일 대비 +100% 이상, 즉 2배)
-    if "거래량 +100%" in selected_conditions:
-        mask = df['Volume'] >= df['Volume'].shift(1) * 2
-        combined_mask = combined_mask & mask
-
-    # 8. 거래량 급증 (전일 대비 +200% 이상, 즉 3배)
-    if "거래량 +200%" in selected_conditions:
-        mask = df['Volume'] >= df['Volume'].shift(1) * 3
-        combined_mask = combined_mask & mask
-        
-    # 9. 거래량 급증 (전일 대비 +300% 이상, 즉 4배)
-    if "거래량 +300%" in selected_conditions:
-        mask = df['Volume'] >= df['Volume'].shift(1) * 4
+        if p['direction'] == '상승':
+            mask = (vol_change >= v_min) & (vol_change < v_max)
+        else: # 하락
+            mask = (vol_change <= -v_min) & (vol_change > -v_max)
         combined_mask = combined_mask & mask
 
     return combined_mask
@@ -128,7 +137,18 @@ def backtest_single_stock(code, name, start_date, end_date, condition, n_days):
     if df.empty:
         return None, None
 
-    df = calculate_mas(df)
+    # 필요한 이평선 기간 추출
+    ma_periods = {5, 20, 60, 120} # 기본 차트용
+    
+    if 'ma' in condition:
+        ma_periods.add(condition['ma']['ma1'])
+        ma_periods.add(condition['ma']['ma2'])
+        ma_periods.add(condition['ma']['ma3'])
+    
+    if 'breakout' in condition:
+        ma_periods.add(condition['breakout']['target_ma'])
+        
+    df = calculate_mas(df, periods=list(ma_periods))
     
     # 조건 만족 여부 체크
     df['Signal'] = check_conditions(df, condition)
@@ -170,6 +190,24 @@ def backtest_single_stock(code, name, start_date, end_date, condition, n_days):
             
     return pd.DataFrame(results), df
 
+def render_ma_input(label, default_val, key):
+    """드롭다운과 숫자 입력을 결합한 UI를 렌더링합니다."""
+    options = [5, 20, 60, 120, '직접 입력']
+    
+    # 기본값이 보기에 있으면 해당 인덱스 사용
+    try:
+        idx = options.index(default_val)
+    except ValueError:
+        idx = 4 # 직접 입력
+        
+    choice = st.selectbox(label, options, index=idx, key=f"{key}_sel")
+    
+    if choice == '직접 입력':
+        val = st.number_input(f"{label} 값 입력", min_value=1, value=default_val, step=1, key=f"{key}_num")
+        return val
+    else:
+        return choice
+
 # --- UI 구성 ---
 
 st.title("📈 주식 전략 백테스팅 & 검색기")
@@ -186,23 +224,65 @@ with st.sidebar:
     start_date = st.date_input("시작일", datetime.date.today() - datetime.timedelta(days=365))
     end_date = st.date_input("종료일", datetime.date.today())
     
-    st.subheader("전략 조건")
-    st.subheader("전략 조건 (다중 선택 가능)")
-    condition_select = st.multiselect(
-        "검색 조건 선택 (AND 조건)",
-        [
-            "정배열",
-            "MA 20>60",
-            "MA 20>120",
-            "종가 > 20선",
-            "종가 > 60선",
-            "종가 > 120선",
-            "거래량 +100%",
-            "거래량 +200%",
-            "거래량 +300%"
-        ],
-        default=["정배열"]
-    )
+    st.subheader("전략 조건 설정")
+    st.markdown("---")
+    
+    condition_params = {}
+
+    # 1. 이평선(일)
+    st.markdown("##### #이평선(일)")
+    use_ma = st.checkbox("이평선 조건 적용", value=True)
+    if use_ma:
+        col1, col2, col3 = st.columns(3)
+        # 기본값: 20 > 60 > 120 (정배열)
+        with col1:
+            ma1 = render_ma_input("MA_1", 20, "ma1")
+        with col2:
+            ma2 = render_ma_input("MA_2", 60, "ma2")
+        with col3:
+            ma3 = render_ma_input("MA_3", 120, "ma3")
+        condition_params['ma'] = {'ma1': ma1, 'ma2': ma2, 'ma3': ma3}
+        st.caption(f"조건: MA{ma1} > MA{ma2} > MA{ma3}")
+
+    st.markdown("---")
+
+    # 2. 주가 돌파(일)
+    st.markdown("##### #주가 돌파(일)")
+    use_breakout = st.checkbox("주가 돌파 조건 적용")
+    if use_breakout:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            price_type = st.selectbox("기준 가격", ['시가', '종가'])
+        with col2:
+            operator = st.selectbox("연산자", ['>', '<'])
+        with col3:
+            target_ma = render_ma_input("대상 이평선", 20, "breakout_ma")
+        condition_params['breakout'] = {'price_type': price_type, 'operator': operator, 'target_ma': target_ma}
+        st.caption(f"조건: 당일 {price_type} {operator} MA{target_ma}")
+
+    st.markdown("---")
+
+    # 3. 주가 등락(일)
+    st.markdown("##### #주가 등락(일)")
+    use_change = st.checkbox("주가 등락 조건 적용")
+    if use_change:
+        col1, col2 = st.columns(2)
+        change_range = col1.selectbox("등락률 범위", ['3~5', '5~7', '7~9', '9이상'])
+        direction = col2.selectbox("방향", ['상승', '하락'])
+        condition_params['change'] = {'range': change_range, 'direction': direction}
+        st.caption(f"조건: 전일 대비 {change_range}% {direction}")
+
+    st.markdown("---")
+
+    # 4. 거래량(일)
+    st.markdown("##### #거래량(일)")
+    use_volume = st.checkbox("거래량 조건 적용")
+    if use_volume:
+        col1, col2 = st.columns(2)
+        vol_range = col1.selectbox("변화율 범위", ['100~200', '200~300', '300이상'])
+        vol_direction = col2.selectbox("거래량 방향", ['상승', '하락'])
+        condition_params['volume'] = {'range': vol_range, 'direction': vol_direction}
+        st.caption(f"조건: 전일 대비 거래량 {vol_range}% {vol_direction}")
     
     n_days = st.number_input("N일 후 수익률 확인", min_value=1, max_value=100, value=5)
 
@@ -223,7 +303,7 @@ with tab1:
         code = selected_stock_str.split(' (')[1][:-1]
         
         with st.spinner(f'{name} 데이터를 분석 중입니다...'):
-            result_df, df = backtest_single_stock(code, name, start_date, end_date, condition_select, n_days)
+            result_df, df = backtest_single_stock(code, name, start_date, end_date, condition_params, n_days)
             
             if result_df is not None and not result_df.empty:
                 st.success("분석 완료!")
@@ -319,7 +399,7 @@ with tab2:
             status_text.text(f"분석 중: {row['Name']} ({idx+1}/{limit_num})")
             
             # 개별 종목 백테스트 실행 (df는 스캔에서 불필요)
-            res, _ = backtest_single_stock(row['Code'], row['Name'], start_date, end_date, condition_select, n_days)
+            res, _ = backtest_single_stock(row['Code'], row['Name'], start_date, end_date, condition_params, n_days)
             
             if res is not None and not res.empty:
                 # 해당 종목의 평균 성과를 요약해서 저장
