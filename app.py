@@ -169,7 +169,12 @@ def backtest_single_stock(code, name, start_date, end_date, condition, n_days):
             current_idx = df.index.get_loc(date)
             future_idx = current_idx + n_days
             
-            if future_idx < len(df):
+            # 입력한 수치가 매매 후 가장 최근 날짜까지의 일수보다도 높다면, 자동으로 가장 최근 날짜까지만 계산
+            if future_idx >= len(df):
+                future_idx = len(df) - 1
+            
+            # 미래 시점의 데이터가 현재보다 뒤에 있는 경우에만 계산
+            if future_idx > current_idx:
                 exit_date = df.index[future_idx]
                 exit_price = df.iloc[future_idx]['Close']
                 
@@ -284,7 +289,7 @@ with st.sidebar:
         condition_params['volume'] = {'range': vol_range, 'direction': vol_direction}
         st.caption(f"조건: 전일 대비 거래량 {vol_range}% {vol_direction}")
     
-    n_days = st.number_input("N일 후 수익률 확인", min_value=1, max_value=100, value=5)
+    n_days = st.number_input("N일 후 수익률 확인", min_value=1, value=5)
 
 # 2. 메인 기능 탭
 tab1, tab2 = st.tabs(["📊 단일 종목 상세 백테스트", "🔎 전체 종목 스캐닝"])
@@ -299,6 +304,9 @@ with tab1:
     selected_stock_str = st.selectbox("종목 검색", stock_choices)
     
     if st.button("백테스팅 시작", key='single_btn'):
+        st.session_state['single_backtest_active'] = True
+
+    if st.session_state.get('single_backtest_active', False):
         name = selected_stock_str.split(' (')[0]
         code = selected_stock_str.split(' (')[1][:-1]
         
