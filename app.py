@@ -145,6 +145,10 @@ def backtest_single_stock(code, name, start_date, end_date, condition, n_days):
         ma_periods.add(condition['ma']['ma2'])
         ma_periods.add(condition['ma']['ma3'])
     
+    if 'ma_cross' in condition:
+        ma_periods.add(condition['ma_cross']['ma1'])
+        ma_periods.add(condition['ma_cross']['ma2'])
+    
     if 'breakout' in condition:
         ma_periods.add(condition['breakout']['target_ma'])
         
@@ -215,28 +219,28 @@ def render_ma_input(label, default_val, key):
 
 # --- UI 구성 ---
 
-st.title("📈 주식 전략 백테스팅 & 검색기")
+st.title("Stock Backtesting & Scanner")
 st.markdown("---")
 
 # 1. 사이드바 설정
 with st.sidebar:
-    st.header("🔍 검색 및 설정")
+    uploaded_file = st.file_uploader("", type=['csv'])
+    st.header("시장 및 기간 설정")
     
     market_select = st.radio("시장 선택", ["KOSPI", "KOSDAQ", "전체"])
-    uploaded_file = st.file_uploader("나만의 종목 리스트 업로드 (CSV)", type=['csv'])
-
+    
     st.subheader("기간 설정")
     start_date = st.date_input("시작일", datetime.date.today() - datetime.timedelta(days=365))
     end_date = st.date_input("종료일", datetime.date.today())
     
-    st.subheader("전략 조건 설정")
     st.markdown("---")
-    
+
+    st.subheader("검색 조건 설정")
     condition_params = {}
 
     # 1. 이평선(일)
-    st.markdown("##### #이평선(일)")
-    use_ma = st.checkbox("이평선 조건 적용", value=True)
+    st.markdown("##### #1. 이평선 배열")
+    use_ma = st.checkbox("이동평균선 정배열/역배열 조건", value=True)
     if use_ma:
         col1, col2, col3 = st.columns(3)
         # 기본값: 20 > 60 > 120 (정배열)
@@ -251,25 +255,42 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # 2. 주가 돌파(일)
-    st.markdown("##### #주가 돌파(일)")
-    use_breakout = st.checkbox("주가 돌파 조건 적용")
+    # 2. 이평선 돌파(일) - MA Cross
+    st.markdown("##### #2. 이평선간 돌파")
+    use_ma_cross = st.checkbox("이동평균선간 돌파 조건")
+    if use_ma_cross:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            cross_ma1 = render_ma_input("MA (Left)", 20, "cross_ma1")
+        with col2:
+            cross_op = st.selectbox("비교", ['>', '<'], key='cross_op')
+        with col3:
+            cross_ma2 = render_ma_input("MA (Right)", 60, "cross_ma2")
+            
+        condition_params['ma_cross'] = {'ma1': cross_ma1, 'operator': cross_op, 'ma2': cross_ma2}
+        st.caption(f"조건: MA{cross_ma1} {cross_op} MA{cross_ma2}")
+
+    st.markdown("---")
+
+    # 3. 주가 돌파(일)
+    st.markdown("##### #3. 주가-이평선 돌파")
+    use_breakout = st.checkbox("주가의 이동평균선 돌파 조건")
     if use_breakout:
         col1, col2, col3 = st.columns(3)
         with col1:
-            price_type = st.selectbox("기준 가격", ['시가', '종가'])
+            price_type = st.selectbox("기준 가격", ['종가', '시가'])
         with col2:
-            operator = st.selectbox("연산자", ['>', '<'])
+            operator = st.selectbox("비교", ['>', '<'])
         with col3:
-            target_ma = render_ma_input("대상 이평선", 20, "breakout_ma")
+            target_ma = render_ma_input("이평선", 20, "breakout_ma")
         condition_params['breakout'] = {'price_type': price_type, 'operator': operator, 'target_ma': target_ma}
         st.caption(f"조건: 당일 {price_type} {operator} MA{target_ma}")
 
     st.markdown("---")
 
-    # 3. 주가 등락(일)
-    st.markdown("##### #주가 등락(일)")
-    use_change = st.checkbox("주가 등락 조건 적용")
+    # 4. 주가 등락(일)
+    st.markdown("##### #4. 주가 당일 등락")
+    use_change = st.checkbox("주가 당일 등락률 조건")
     if use_change:
         col1, col2 = st.columns(2)
         change_range = col1.selectbox("등락률 범위", ['3~5', '5~7', '7~9', '9이상'])
@@ -279,24 +300,28 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # 4. 거래량(일)
-    st.markdown("##### #거래량(일)")
-    use_volume = st.checkbox("거래량 조건 적용")
+    # 5. 거래량(일)
+    st.markdown("##### #5. 전일 대비 거래량")
+    use_volume = st.checkbox("전일 대비 거래량 변동성 조건")
     if use_volume:
         col1, col2 = st.columns(2)
-        vol_range = col1.selectbox("변화율 범위", ['100~200', '200~300', '300이상'])
-        vol_direction = col2.selectbox("거래량 방향", ['상승', '하락'])
+        vol_range = col1.selectbox("변동성 범위", ['100~200', '200~300', '300이상'])
+        vol_direction = col2.selectbox("거래량 추이", ['상승', '하락'])
         condition_params['volume'] = {'range': vol_range, 'direction': vol_direction}
         st.caption(f"조건: 전일 대비 거래량 {vol_range}% {vol_direction}")
     
-    n_days = st.number_input("N일 후 수익률 확인", min_value=1, value=5)
+    st.markdown("---")
+
+    col_n1, col_n2 = st.columns(2)
+    with col_n1:
+        n_days = st.number_input("N일 후 수익률 확인", min_value=1, value=5)
 
 # 2. 메인 기능 탭
-tab1, tab2 = st.tabs(["📊 단일 종목 상세 백테스트", "🔎 전체 종목 스캐닝"])
+tab1, tab2 = st.tabs(["Stock Backtest", "All Stock Scanning"])
 
 # --- 탭 1: 단일 종목 백테스트 ---
 with tab1:
-    st.markdown("### 특정 종목을 선택하여 전략을 검증합니다.")
+    st.markdown("### 설정한 조건에서 검색한 종목의 승률 및 수익률을 확인합니다.")
     
     stock_list = get_stock_list(market_select, uploaded_file)
     # 검색 편의를 위해 "종목명 (코드)" 형식으로 리스트 생성
@@ -385,10 +410,33 @@ with tab1:
 
 # --- 탭 2: 전체 종목 스캐닝 ---
 with tab2:
-    st.markdown("### 전체 시장에서 조건에 맞는 종목을 찾습니다.")
+    st.markdown("### 검색 범위 중 설정한 조건 하에 승률 70% 이상인 종목만 추출합니다.")
     st.info("⚠️ 전체 종목 검색은 시간이 오래 걸릴 수 있어, 시가총액 상위 종목으로 제한하거나 샘플링하는 것을 권장합니다.")
     
-    limit_num = st.slider("검색 대상 종목 수 (시가총액 상위 순)", 10, 200, 50)
+    
+    # 세션 상태 초기화 및 동기화 키 설정
+    if 'scan_limit' not in st.session_state:
+        st.session_state['scan_limit'] = 50
+    if 'limit_slider' not in st.session_state:
+        st.session_state['limit_slider'] = 50
+    if 'limit_num' not in st.session_state:
+        st.session_state['limit_num'] = 50
+
+    def update_limit_slider():
+        st.session_state['scan_limit'] = st.session_state['limit_slider']
+        st.session_state['limit_num'] = st.session_state['limit_slider']
+        
+    def update_limit_num():
+        st.session_state['scan_limit'] = st.session_state['limit_num']
+        st.session_state['limit_slider'] = st.session_state['limit_num']
+
+    col_l1, col_l2 = st.columns([5, 1])
+    with col_l1:
+        st.slider("검색 대상 종목 수 (시가총액 상위 순)", 10, 200, key='limit_slider', on_change=update_limit_slider)
+    with col_l2:
+        st.number_input("수치 정밀 조정 (+/-)", 10, 200, key='limit_num', on_change=update_limit_num)
+        
+    limit_num = st.session_state['scan_limit']
     
     if st.button("조건 만족 종목 추출", key='scan_btn'):
         stock_list = get_stock_list(market_select, uploaded_file)
