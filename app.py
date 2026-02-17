@@ -329,7 +329,7 @@ with tab1:
     # 검색 편의를 위해 "종목명 (코드)" 형식으로 리스트 생성
     stock_choices = stock_list.apply(lambda x: f"{x['Name']} ({x['Code']})", axis=1)
     selected_stock_str = st.selectbox("종목 검색", stock_choices)
-    
+
     st.markdown("")
     
     if st.button("백테스팅 시작", key='single_btn'):
@@ -414,7 +414,7 @@ with tab1:
 
 # --- 탭 2: 전체 종목 스캐닝 ---
 with tab2:
-    st.markdown("### 검색 범위 중 설정한 조건 하에 승률 70% 이상인 종목만 추출합니다.")
+    st.markdown("### 검색 범위 중 설정한 조건 하에 승률 50% 이상인 종목만 추출합니다.")
     st.info("⚠️ 전체 종목 검색은 시간이 오래 걸릴 수 있어, 시가총액 순 검색을 권장합니다.")
     st.markdown("")
 
@@ -512,10 +512,10 @@ with tab2:
             # 평균 수익률 순으로 정렬
             result_summary = result_summary.sort_values(by='평균 수익률(%)', ascending=False)
             
-            # 승률 70% 이상 필터링
-            filtered_summary = result_summary[result_summary['승률(%)'] >= 70.0]
+            # 승률 50% 이상 필터링
+            filtered_summary = result_summary[result_summary['승률(%)'] >= 50.0]
             
-            st.write(f"검색 결과: 총 {len(filtered_summary)}개 종목 발견 (승률 70% 이상)")
+            st.write(f"검색 결과: 총 {len(filtered_summary)}개 종목 발견 (승률 50% 이상)")
             st.dataframe(filtered_summary, use_container_width=True)
         else:
             st.warning("조건을 만족하는 종목을 찾지 못했습니다.")
