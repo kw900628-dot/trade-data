@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 .streamlit/
+
+opendart_api_key.txt

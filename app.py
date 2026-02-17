@@ -4,6 +4,7 @@ import pandas as pd
 import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import os
 try:
     import OpenDartReader
 except ImportError:
@@ -82,6 +83,25 @@ def check_conditions(df, params):
         mask = (df[f'MA{p["ma1"]}'] > df[f'MA{p["ma2"]}']) & (df[f'MA{p["ma2"]}'] > df[f'MA{p["ma3"]}'])
         combined_mask = combined_mask & mask
 
+    # 1.5 이평선 돌파(일) - MA Cross (크로스 발생 시점 체크)
+    if 'ma_cross' in params:
+        p = params['ma_cross']
+        ma1_col = df[f'MA{p["ma1"]}']
+        ma2_col = df[f'MA{p["ma2"]}']
+        
+        # 이전 날짜 데이터 (shift 1)
+        prev_ma1 = ma1_col.shift(1)
+        prev_ma2 = ma2_col.shift(1)
+        
+        if p['operator'] == '>':
+            # 골든크로스: 어제는 ma1 < ma2 였다가, 오늘은 ma1 > ma2
+            mask = (prev_ma1 <= prev_ma2) & (ma1_col > ma2_col)
+        else:
+            # 데드크로스: 어제는 ma1 > ma2 였다가, 오늘은 ma1 < ma2
+            mask = (prev_ma1 >= prev_ma2) & (ma1_col < ma2_col)
+            
+        combined_mask = combined_mask & mask
+
     # 2. 주가 돌파(일)
     if 'breakout' in params:
         p = params['breakout']
@@ -155,16 +175,44 @@ def get_fundamental_data(api_key, stock_code, start_year, end_year):
                 try:
                     df = dart.finstate(corp=stock_code, bsns_year=str(year), reprt_code=code)
                     if df is not None and not df.empty:
-                        # 필요한 컬럼만 추출 (재무제표 종류 등 필터링 필요)
-                        # 연결재무제표 우선 (CFS), 없으면 별도(OFS) 고려해야 하나 일단 CFS 기준
-                        # 필요한 계정: 매출액, 영업이익, 당기순이익, 자본총계, 부채총계, 영업활동현금흐름, 유형자산의취득
-                        target_accounts = ['매출액', '영업이익', '당기순이익', '자본총계', '부채총계', '영업활동현금흐름', '유형자산의취득']
-                        df = df[(df['fs_div'] == 'CFS') & (df['account_nm'].isin(target_accounts))]
+                        # 1. CFS(연결) 우선, 없으면 OFS(별도) 사용
+                        if 'CFS' in df['fs_div'].unique():
+                            df = df[df['fs_div'] == 'CFS']
+                        else:
+                            df = df[df['fs_div'] == 'OFS']
                         
-                        if not df.empty:
-                            df['year'] = year
-                            df['reprt_code'] = code
-                            all_data.append(df)
+                        # 2. 계정명 표준화 (동의어 처리)
+                        # 목표 계정: 매출액, 영업이익, 당기순이익, 자본총계, 부채총계, 영업활동현금흐름, 유형자산의취득
+                        
+                        # 표준화 함수
+                        def normalize_account_nm(nm):
+                            nm = nm.replace(' ', '') # 공백 제거
+                            if nm in ['매출액', '수익(매출액)', '매출']: return '매출액'
+                            if nm in ['영업이익', '영업이익(손실)']: return '영업이익'
+                            if nm in ['당기순이익', '당기순이익(손실)', '연결당기순이익', '법인세비용차감전계속영업이익']: return '당기순이익' # 법인세...는 차선책
+                            if nm in ['자본총계', '자본']: return '자본총계'
+                            if nm in ['부채총계', '부채']: return '부채총계'
+                            if '영업활동' in nm and '현금흐름' in nm: return '영업활동현금흐름' # 영업활동으로인한현금흐름 등
+                            if '유형자산' in nm and ('취득' in nm or '증가' in nm): return '유형자산의취득' # 유형자산의 취득, 유형자산의증가
+                            return nm
+                            
+                        df['account_nm_norm'] = df['account_nm'].apply(normalize_account_nm)
+                        
+                        target_accounts = ['매출액', '영업이익', '당기순이익', '자본총계', '부채총계', '영업활동현금흐름', '유형자산의취득']
+                        
+                        # 필터링
+                        df_filtered = df[df['account_nm_norm'].isin(target_accounts)].copy()
+                        
+                        if not df_filtered.empty:
+                            # 중복 제거 (같은 표준 명칭이 여러 개일 경우, 첫 번째 것 사용하거나 우선순위)
+                            df_filtered = df_filtered.drop_duplicates(subset=['account_nm_norm'], keep='first')
+                            
+                            df_filtered['account_nm'] = df_filtered['account_nm_norm'] # 표준 명칭으로 덮어쓰기
+                            df_filtered = df_filtered.drop(columns=['account_nm_norm'])
+                            
+                            df_filtered['year'] = year
+                            df_filtered['reprt_code'] = code
+                            all_data.append(df_filtered)
                 except:
                     continue
                     
@@ -547,12 +595,24 @@ def render_ma_input(label, default_val, key):
 st.title("Stock Backtesting & Scanner")
 st.markdown("---")
 
+def load_api_key_from_file():
+    try:
+        if os.path.exists("opendart_api_key.txt"):
+            with open("opendart_api_key.txt", "r", encoding="utf-8") as f:
+                return f.read().strip()
+    except:
+        pass
+    return ""
+
 # 1. 사이드바 설정
 with st.sidebar:
     uploaded_file = st.file_uploader("", type=['csv'])
     
     st.markdown("### OpenDart 설정 (기본적 분석)")
-    opendart_api_key = st.text_input("API Key 입력", type="password", help="OpenDart API Key가 필요합니다.")
+    default_api_key = load_api_key_from_file()
+    opendart_api_key = st.text_input("OpenDart API Key", value=default_api_key, type="password", help="OpenDart API Key가 필요합니다.")
+    if not default_api_key:
+         st.caption("💡 'opendart_api_key.txt' 파일을 생성하여 키를 저장하면 자동 입력됩니다.")
 
     st.header("시장 및 기간 설정")
     
@@ -697,56 +757,138 @@ with tab1:
                 st.dataframe(result_df, use_container_width=True)
                 
                 # 차트 시각화 (Plotly Candlestick + Volume)
-                st.subheader(f"📊 {name} ({code}) 주가 차트")
+                # 차트 삭제 요청으로 인해 주석 처리 또는 제거
+                # st.plotly_chart(fig, use_container_width=True)
                 
-                # mask_period 재계산 필요 (함수 내부 로직과 동일하게)
-                mask_period = (df.index >= pd.to_datetime(start_date)) & (df.index <= pd.to_datetime(end_date))
-                chart_df = df.loc[mask_period].copy()
-                
-                # Subplots 생성 (2행 1열, 높이 비율 조절)
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                                    vertical_spacing=0.03, 
-                                    row_heights=[0.7, 0.3],
-                                    subplot_titles=(f'{name} 주가', '거래량'))
-                
-                # 거래량 색상 계산 (전체 df 기준)
-                df['VolColor'] = ['red' if df['Volume'].iloc[i] >= df['Volume'].iloc[i-1] else 'blue' for i in range(len(df))]
-                df.iloc[0, df.columns.get_loc('VolColor')] = 'red' 
+                # --- 기본적 분석 결과 리포트 ---
+                st.markdown("### 📊 기본적 분석 리포트")
+                if not opendart_api_key:
+                    st.warning("OpenDart API Key가 입력되지 않아 기본적 분석 결과를 표시할 수 없습니다.")
+                else:
+                    # 데이터 가져오기 (3년전 ~ 현재)
+                    fund_start_year = start_date.year - 4
+                    fund_end_year = end_date.year
+                    fund_df = get_fundamental_data(opendart_api_key, code, fund_start_year, fund_end_year)
+                    
+                    if fund_df is None or fund_df.empty:
+                        st.error("재무 데이터를 가져올 수 없습니다.")
+                    else:
+                        # 데이터 전처리 (금액 수치화, FCF 계산, 영업이익률 계산, 공시일 계산 등)
+                        # process_fundamental_data 내부 로직 일부 재사용하거나 별도 처리
+                        # 여기서는 화면 표시용이므로 직관적으로 계산
+                        
+                        # 1. 전처리
+                        fund_df['amount'] = pd.to_numeric(fund_df['thstrm_amount'].str.replace(',', ''), errors='coerce')
+                        
+                        # 공시일(release_date)
+                        def get_release_date_local(row):
+                            y = int(row['year'])
+                            rc = row['reprt_code']
+                            if rc == '11013': return pd.Timestamp(f"{y}-05-15")
+                            elif rc == '11012': return pd.Timestamp(f"{y}-08-14")
+                            elif rc == '11014': return pd.Timestamp(f"{y}-11-14")
+                            elif rc == '11011': return pd.Timestamp(f"{y+1}-03-31")
+                            return pd.Timestamp(f"{y}-12-31")
+                        fund_df['release_date'] = fund_df.apply(get_release_date_local, axis=1)
 
-                # 차트 데이터 추출
-                chart_df = df.loc[mask_period].copy()
-                
-                # 주말/공휴일 제거를 위해 x축을 문자열로 변환 (Category type) - 모든 트레이스에 적용됨
-                chart_df.index = chart_df.index.strftime('%Y-%m-%d')
+                        # FCF 추가
+                        try:
+                            df_ocf = fund_df[fund_df['account_nm']=='영업활동현금흐름'][['year', 'reprt_code', 'amount']].rename(columns={'amount': 'ocf'})
+                            df_capex = fund_df[fund_df['account_nm']=='유형자산의취득'][['year', 'reprt_code', 'amount']].rename(columns={'amount': 'capex'})
+                            
+                            df_fcf = pd.merge(df_ocf, df_capex, on=['year', 'reprt_code'], how='left').fillna(0)
+                            df_fcf['amount'] = df_fcf['ocf'] - df_fcf['capex'].abs()
+                            df_fcf['account_nm'] = 'FCF'
+                            # release_date 등 병합 생략하고 concat용으로 최소화
+                            # year/report_code로 원본 merge해서 release_date 가져오기
+                            df_fcf = pd.merge(df_fcf, fund_df[['year', 'reprt_code', 'release_date']].drop_duplicates(), on=['year', 'reprt_code'], how='left')
+                            fund_df = pd.concat([fund_df, df_fcf], ignore_index=True)
+                        except: pass
 
-                # 1. 캔들차트 (Row 1)
-                fig.add_trace(go.Candlestick(x=chart_df.index,
-                                open=chart_df['Open'],
-                                high=chart_df['High'],
-                                low=chart_df['Low'],
-                                close=chart_df['Close'],
-                                increasing_line_color='red',
-                                decreasing_line_color='blue',
-                                name='Price'), row=1, col=1)
-                
-                # 2. 이동평균선 (Row 1)
-                fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA5'], line=dict(color='purple', width=1), name='MA5'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA60'], line=dict(color='green', width=1), name='MA60'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA120'], line=dict(color='gray', width=1), name='MA120'), row=1, col=1)
-                
-                # 3. 거래량 (Row 2)
-                fig.add_trace(go.Bar(x=chart_df.index, y=chart_df['Volume'], marker_color=chart_df['VolColor'], name='Volume'), row=2, col=1)
-                
-                # x축 설정: type='category'로 설정하여 빈 날짜(주말 등) 제거
-                fig.update_xaxes(type='category', row=1, col=1)
-                fig.update_xaxes(type='category', row=2, col=1)
-                
-                # 틱 라벨이 너무 많아지는 것을 방지 (적절히 건너뛰기)
-                # category type에서는 nticks가 잘 안 먹힐 수 있음. tickmode='auto' 유지.
-                
-                fig.update_layout(xaxis_rangeslider_visible=False, height=600)
-                st.plotly_chart(fig, use_container_width=True)
+                        # 영업이익률 추가
+                        try:
+                            df_rev = fund_df[fund_df['account_nm']=='매출액'][['year', 'reprt_code', 'amount']].rename(columns={'amount': 'rev'})
+                            df_op = fund_df[fund_df['account_nm']=='영업이익'][['year', 'reprt_code', 'amount']].rename(columns={'amount': 'op'})
+                            df_margin = pd.merge(df_rev, df_op, on=['year', 'reprt_code'], how='inner')
+                            df_margin['amount'] = df_margin.apply(lambda x: (x['op'] / x['rev'] * 100) if x['rev'] != 0 else 0, axis=1)
+                            df_margin['account_nm'] = '영업이익률'
+                            df_margin = pd.merge(df_margin, fund_df[['year', 'reprt_code', 'release_date']].drop_duplicates(), on=['year', 'reprt_code'], how='left')
+                            fund_df = pd.concat([fund_df, df_margin], ignore_index=True)
+                        except: pass
+
+                        # 체크 리스트
+                        check_items = [
+                            ("매출액 추이 (3년 연속 상승)", '매출액', 'year', 'growth'),
+                            ("매출액 추이 (3분기 연속 상승)", '매출액', 'quarter', 'growth'),
+                            ("영업이익 추이 (3년 연속 상승)", '영업이익', 'year', 'growth'),
+                            ("영업이익 추이 (3분기 연속 상승)", '영업이익', 'quarter', 'growth'),
+                            ("영업이익률 추이 (3년 연속 상승)", '영업이익률', 'year', 'growth'),
+                            ("영업이익률 추이 (3분기 연속 상승)", '영업이익률', 'quarter', 'growth'),
+                            ("당기순이익 추이 (3년 연속 상승)", '당기순이익', 'year', 'growth'),
+                            ("당기순이익 추이 (3분기 연속 상승)", '당기순이익', 'quarter', 'growth'),
+                            ("FCF (3년 연속 흑자)", 'FCF', 'year', 'surplus'),
+                            ("FCF (3분기 연속 흑자)", 'FCF', 'quarter', 'surplus'),
+                        ]
+                        
+                        results = []
+                        
+                        # Growth/Surplus Check Function
+                        def check_status(item, period, mode):
+                            df_item = fund_df[fund_df['account_nm'] == item].copy()
+                            if df_item.empty: return "데이터 없음"
+                            
+                            if period == 'year':
+                                df_target = df_item[df_item['reprt_code'] == '11011'].sort_values('year').drop_duplicates(['year'], keep='last')
+                            else:
+                                df_target = df_item.sort_values('release_date')
+                                
+                            vals = df_target['amount'].values
+                            if len(vals) < 4: return "데이터 부족"
+                            
+                            # 최근 4개 (v0 -> v1 -> v2 -> v3(최근))
+                            v = vals[-4:]
+                            v0, v1, v2, v3 = v[0], v[1], v[2], v[3]
+                            
+                            if mode == 'growth':
+                                # 단순 상승 여부 (>0 성장)
+                                try:
+                                    cond = (v1 > v0) and (v2 > v1) and (v3 > v2)
+                                    return "✅ 만족" if cond else "❌ 불만족"
+                                except: return "계산 오류"
+                            elif mode == 'surplus':
+                                # 흑자 지속 (값 > 0) -> 최근 3개만 보면 됨? "연속 3년/3분기"
+                                # v1, v2, v3가 0보다 큰지
+                                try:
+                                    cond = (v1 > 0) and (v2 > 0) and (v3 > 0)
+                                    return "✅ 만족" if cond else "❌ 불만족"
+                                except: return "계산 오류"
+                        
+                        for label, item, period, mode in check_items:
+                            status = check_status(item, period, mode)
+                            results.append((label, status))
+                            
+                        # 부채비율 (최근 분기 100% 이하)
+                        try:
+                            df_liab = fund_df[fund_df['account_nm']=='부채총계'].sort_values('release_date')
+                            df_eq = fund_df[fund_df['account_nm']=='자본총계'].sort_values('release_date')
+                            if not df_liab.empty and not df_eq.empty:
+                                try:
+                                    last_liab = df_liab.iloc[-1]['amount']
+                                    last_eq = df_eq.iloc[-1]['amount']
+                                    if last_eq > 0:
+                                        debt_ratio = (last_liab / last_eq) * 100
+                                        debt_status = "✅ 만족" if debt_ratio <= 100 else f"❌ 불만족 ({debt_ratio:.1f}%)"
+                                    else:
+                                        debt_status = "자본잠식"
+                                except: debt_status = "데이터 오류"
+                            else: debt_status = "데이터 없음"
+                        except: debt_status = "데이터 없음"
+                        
+                        results.append(("부채비율 (최근 분기 100% 이하)", debt_status))
+                        
+                        # 결과 출력
+                        st.table(pd.DataFrame(results, columns=["항목", "결과"]))
+
             else:
                 st.warning("설정된 기간 내에 조건에 부합하는 신호가 없습니다.")
 
