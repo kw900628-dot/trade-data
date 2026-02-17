@@ -231,8 +231,11 @@ with st.sidebar:
     market_select = st.radio("시장 선택", ["KOSPI", "KOSDAQ", "전체"])
     
     st.subheader("기간 설정")
-    start_date = st.date_input("시작일(15-02-17)", datetime.date.today() - datetime.timedelta(days=365))
-    end_date = st.date_input("종료일", datetime.date.today())
+    today = datetime.date.today()
+    min_date = datetime.date(2000, 1, 1)
+
+    start_date = st.date_input("시작일(00-01-01부터)", value=today - datetime.timedelta(days=365), min_value=min_date, max_value=today)
+    end_date = st.date_input("종료일(오늘까지)", value=today, min_value=min_date, max_value=today)
     
     st.markdown("---")
 
