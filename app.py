@@ -10,6 +10,7 @@ st.set_page_config(layout="wide", page_title="주식 백테스팅 & 검색기")
 
 # --- 유틸리티 함수 ---
 
+@st.cache_data
 def get_stock_list(market_type=None, uploaded_file=None):
     """KOSPI/KOSDAQ 종목 리스트를 가져오거나 업로드된 CSV를 읽습니다."""
     # 1. 사용자 업로드 파일 우선
@@ -322,11 +323,14 @@ tab1, tab2 = st.tabs(["Stock Backtest", "All Stock Scanning"])
 # --- 탭 1: 단일 종목 백테스트 ---
 with tab1:
     st.markdown("### 설정한 조건에서 검색한 종목의 승률 및 수익률을 확인합니다.")
+    st.markdown("")
     
     stock_list = get_stock_list(market_select, uploaded_file)
     # 검색 편의를 위해 "종목명 (코드)" 형식으로 리스트 생성
     stock_choices = stock_list.apply(lambda x: f"{x['Name']} ({x['Code']})", axis=1)
     selected_stock_str = st.selectbox("종목 검색", stock_choices)
+    
+    st.markdown("")
     
     if st.button("백테스팅 시작", key='single_btn'):
         st.session_state['single_backtest_active'] = True
@@ -411,8 +415,9 @@ with tab1:
 # --- 탭 2: 전체 종목 스캐닝 ---
 with tab2:
     st.markdown("### 검색 범위 중 설정한 조건 하에 승률 70% 이상인 종목만 추출합니다.")
-    st.info("⚠️ 전체 종목 검색은 시간이 오래 걸릴 수 있어, 시가총액 상위 종목으로 제한하거나 샘플링하는 것을 권장합니다.")
-    
+    st.info("⚠️ 전체 종목 검색은 시간이 오래 걸릴 수 있어, 시가총액 순 검색을 권장합니다.")
+    st.markdown("")
+
     
     # 세션 상태 초기화 및 동기화 키 설정
     if 'scan_limit' not in st.session_state:
@@ -430,18 +435,45 @@ with tab2:
         st.session_state['scan_limit'] = st.session_state['limit_num']
         st.session_state['limit_slider'] = st.session_state['limit_num']
 
+    # 전체 종목 수 계산 (최대값 설정을 위해)
+    # 캐싱된 함수 호출로 성능 부하 최소화
+    current_stock_list = get_stock_list(market_select, uploaded_file)
+    total_stock_count = len(current_stock_list) if not current_stock_list.empty else 200
+
     col_l1, col_l2 = st.columns([5, 1])
     with col_l1:
-        st.slider("검색 대상 종목 수 (시가총액 상위 순)", 10, 200, key='limit_slider', on_change=update_limit_slider)
+        st.slider("검색 대상 종목 수(시가총액 순)", 10, total_stock_count, key='limit_slider', on_change=update_limit_slider)
     with col_l2:
-        st.number_input("수치 정밀 조정 (+/-)", 10, 200, key='limit_num', on_change=update_limit_num)
+        st.number_input("수치 조정", 10, total_stock_count, key='limit_num', on_change=update_limit_num)
         
     limit_num = st.session_state['scan_limit']
     
-    if st.button("조건 만족 종목 추출", key='scan_btn'):
+    st.markdown("")
+
+
+
+    col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
+    with col_btn1:
+        start_scan = st.button("시가총액 상위 종목 검색", key='scan_top', use_container_width=True)
+    with col_btn2:
+        start_all = st.button("전체 종목 검색", key='scan_all', use_container_width=True)
+    with col_btn3:
+        stop_scan = st.button("검색 중지", key='stop_scan', use_container_width=True)
+
+    if stop_scan:
+        st.warning("검색이 중지되었습니다.")
+        st.stop()
+
+    if start_scan or start_all:
         stock_list = get_stock_list(market_select, uploaded_file)
-        # 상위 N개만 테스트 (속도 문제 해결)
-        target_stocks = stock_list.head(limit_num)
+        
+        if start_all:
+            target_stocks = stock_list
+            st.info(f"선택한 시장의 전체 종목 ({len(target_stocks)}개)을 검색합니다. 시간이 오래 걸릴 수 있습니다.")
+        else:
+            # 상위 N개만 테스트
+            target_stocks = stock_list.head(limit_num)
+            st.info(f"시가총액 상위 {limit_num}개 종목을 검색합니다.")
         
         final_results = []
         progress_bar = st.progress(0)
@@ -452,7 +484,7 @@ with tab2:
             # 진행률 표시
             progress = (idx + 1) / len(target_stocks)
             progress_bar.progress(progress)
-            status_text.text(f"분석 중: {row['Name']} ({idx+1}/{limit_num})")
+            status_text.text(f"분석 중: {row['Name']} ({idx+1}/{len(target_stocks)})")
             
             # 개별 종목 백테스트 실행 (df는 스캔에서 불필요)
             res, _ = backtest_single_stock(row['Code'], row['Name'], start_date, end_date, condition_params, n_days)
